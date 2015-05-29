@@ -186,8 +186,8 @@ deriveDataPrim name typeParams cons =
 
        myType = foldl AppT (ConT name) typeParams
        dataCxt typ = conT ''Data `appT` varT (mkName "ctx") `appT` return typ
-       dataCxt' typ = return $ ClassP ''Data [VarT (mkName "ctx"), typ]
-       satCxt typ = return $ ClassP ''Sat [VarT (mkName "ctx") `AppT` typ]
+       dataCxt' typ = classP ''Data $ map pure [VarT (mkName "ctx"), typ]
+       satCxt typ = classP ''Sat $ map pure [VarT (mkName "ctx") `AppT` typ]
        dataCxtTypes = filter (\x -> applied x /= ConT name) $ nub (typeParams ++ types)
        satCxtTypes = nub (myType : types)
        context = cxt (map dataCxt' dataCxtTypes ++ map satCxt satCxtTypes)
