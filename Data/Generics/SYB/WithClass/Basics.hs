@@ -206,8 +206,9 @@ fromConstrM ctx f = gunfold ctx k z
 
 --
 -- | Representation of datatypes.
--- | A package of constructor representations with names of type and module.
--- | The list of constructors could be an array, a balanced tree, or others.
+--
+-- A package of constructor representations with names of type and module.
+-- The list of constructors could be an array, a balanced tree, or others.
 --
 data DataType = DataType
                         { tycon   :: String
@@ -256,7 +257,7 @@ data ConstrRep = AlgConstr    ConIndex
 
 --
 -- | Unique index for datatype constructors.
--- | Textual order is respected. Starts at 1.
+-- Textual order is respected. Starts at 1.
 --
 type ConIndex = Int
 
@@ -459,7 +460,7 @@ mkPrimType dr str = DataType
                         }
 
 
--- Makes a constructor for primitive types
+-- | Makes a constructor for primitive types
 mkPrimCon :: DataType -> String -> ConstrRep -> Constr
 mkPrimCon dt str cr = Constr
                         { datatype  = dt
