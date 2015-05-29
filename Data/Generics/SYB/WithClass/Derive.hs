@@ -81,8 +81,8 @@ deriveDataPrim name typeParams cons =
 #ifdef __HADDOCK__
  undefined
 #else
- do theDataTypeName <- newName $ "dataType_sybwc_" ++ show name
-    constrNames <- mapM (\(conName,_,_,_) -> newName $ "constr_sybwc_" ++ show conName) cons
+ do theDataTypeName <- return $ mkName "dataType"
+    constrNames <- mapM (\(conName,_,_,_) -> return $ mkName $ "constr_" ++ nameBase conName) cons
     let constrExps = map varE constrNames
 
     let mkConstrDec :: Name -> Constructor -> Q [Dec]
@@ -102,82 +102,90 @@ deriveDataPrim name typeParams cons =
                         funD decNm [clause [] (normalB body) []]
                       ]
     conDecss <- zipWithM mkConstrDec constrNames cons
-    let conDecs = concat conDecss
-    sequence (
-     -- Creates
-     -- constr :: Constr
-     -- constr = mkConstr dataType "DataTypeName" [] Prefix
-     map return conDecs ++
-     [ -- Creates
-       -- dataType :: DataType
-       sigD theDataTypeName [t| DataType |]
-     , -- Creates
-       -- dataType = mkDataType <name> [<constructors]
-       let nameStr = nameBase name
-           body = [| mkDataType nameStr $(listE constrExps) |]
-       in funD theDataTypeName [clause [] (normalB body) []]
-     , -- Creates
-       -- instance (Data ctx Int, Sat (ctx Int), Sat (ctx DataType))
-       --       => Data ctx DataType
-       instanceD context (dataCxt myType)
-       [ -- Define the gfoldl method
-         do f <- newName "_f"
-            z <- newName "z"
-            x <- newName "x"
-            let -- Takes a pair (constructor name, number of type
-                -- arguments) and creates the correct definition for
-                -- gfoldl. It is of the form
-                --     z <constr name> `f` arg1 `f` ... `f` argn
-                mkMatch (c, n, _, _)
-                 = do args <- replicateM n (newName "arg")
-                      let applyF e arg = [| $(varE f) $e $(varE arg) |]
-                          body = foldl applyF [| $(varE z) $(conE c) |] args
-                      match (conP c $ map varP args) (normalB body) []
-                matches = map mkMatch cons
-            funD 'gfoldl [ clause (wildP : map varP [f, z, x])
-                                  (normalB $ caseE (varE x) matches)
-                                  []
+
+    -- Unfortunately these will be duplicated between dataTypeOf and toConstr.
+    -- Previously these definitions would be bound to top-level names formed from the name
+    -- of the type whose instance we are deriving. In order to be unique
+    -- (e.g. in the case of ByteString) this name needs to include the name of the
+    -- defining module. Sadly GHC no longer allows names like this. For this reason we
+    -- simply bind these names in `where` clauses in dataTypeOf and toConstr.
+    let decs =
+          [ -- Creates
+            -- dataType :: DataType
+            sigD theDataTypeName [t| DataType |]
+          , -- Creates
+            -- dataType = mkDataType <name> [<constructors]
+            let nameStr = nameBase name
+                body = [| mkDataType nameStr $(listE constrExps) |]
+            in funD theDataTypeName [clause [] (normalB body) []]
+          ]
+          -- Creates
+          -- constr :: Constr
+          -- constr = mkConstr dataType "DataTypeName" [] Prefix
+          ++ map return (concat conDecss)
+
+    -- Creates
+    -- instance (Data ctx Int, Sat (ctx Int), Sat (ctx DataType))
+    --       => Data ctx DataType
+    inst <- instanceD context (dataCxt myType)
+      [ -- Define the gfoldl method
+        do f <- newName "_f"
+           z <- newName "z"
+           x <- newName "x"
+           let -- Takes a pair (constructor name, number of type
+               -- arguments) and creates the correct definition for
+               -- gfoldl. It is of the form
+               --     z <constr name> `f` arg1 `f` ... `f` argn
+               mkMatch (c, n, _, _)
+                = do args <- replicateM n (newName "arg")
+                     let applyF e arg = [| $(varE f) $e $(varE arg) |]
+                         body = foldl applyF [| $(varE z) $(conE c) |] args
+                     match (conP c $ map varP args) (normalB body) []
+               matches = map mkMatch cons
+           funD 'gfoldl [ clause (wildP : map varP [f, z, x])
+                                 (normalB $ caseE (varE x) matches)
+                                 []
+                        ]
+      , -- Define the gunfold method
+        do k <- newName "_k"
+           z <- newName "z"
+           c <- newName "c"
+           let body = if null cons
+                      then [| error "gunfold : Type has no constructors" |]
+                      else caseE [| constrIndex $(varE c) |] matches
+               mkMatch n (cn, i, _, _)
+                = match (litP $ integerL n)
+                        (normalB $ reapply (appE (varE k))
+                                           i
+                                           [| $(varE z) $(conE cn) |]
+                        )
+                        []
+                  where reapply _ 0 f = f
+                        reapply x j f = x (reapply x (j-1) f)
+               fallThroughMatch
+                = match wildP (normalB [| error "gunfold: fallthrough" |]) []
+               matches = zipWith mkMatch [1..] cons ++ [fallThroughMatch]
+           funD 'gunfold [clause (wildP : map varP [k, z, c])
+                                 (normalB body)
+                                 []
                          ]
-       , -- Define the gunfold method
-         do k <- newName "_k"
-            z <- newName "z"
-            c <- newName "c"
-            let body = if null cons
-                       then [| error "gunfold : Type has no constructors" |]
-                       else caseE [| constrIndex $(varE c) |] matches
-                mkMatch n (cn, i, _, _)
-                 = match (litP $ integerL n)
-                         (normalB $ reapply (appE (varE k))
-                                            i
-                                            [| $(varE z) $(conE cn) |]
-                         )
-                         []
-                   where reapply _ 0 f = f
-                         reapply x j f = x (reapply x (j-1) f)
-                fallThroughMatch
-                 = match wildP (normalB [| error "gunfold: fallthrough" |]) []
-                matches = zipWith mkMatch [1..] cons ++ [fallThroughMatch]
-            funD 'gunfold [clause (wildP : map varP [k, z, c])
-                                  (normalB body)
-                                  []
+      , -- Define the toConstr method
+        do x <- newName "x"
+           let mkSel (c, n, _, _) e = match (conP c $ replicate n wildP)
+                                            (normalB e)
+                                            []
+               body = caseE (varE x) (zipWith mkSel cons constrExps)
+           funD 'toConstr [ clause [wildP, varP x]
+                                   (normalB body)
+                                   decs
                           ]
-       , -- Define the toConstr method
-         do x <- newName "x"
-            let mkSel (c, n, _, _) e = match (conP c $ replicate n wildP)
-                                             (normalB e)
-                                             []
-                body = caseE (varE x) (zipWith mkSel cons constrExps)
-            funD 'toConstr [ clause [wildP, varP x]
-                                    (normalB body)
-                                    []
-                           ]
-       , -- Define the dataTypeOf method
-         funD 'dataTypeOf [ clause [wildP, wildP]
-                                   (normalB $ varE theDataTypeName)
-                                   []
-                          ]
-       ]
-     ])
+      , -- Define the dataTypeOf method
+        funD 'dataTypeOf [ clause [wildP, wildP]
+                                  (normalB $ varE theDataTypeName)
+                                  decs
+                         ]
+      ]
+    return [inst]
  where notTyVar (VarT _) = False
        notTyVar _        = True
        applied (AppT f _) = applied f
@@ -186,8 +194,8 @@ deriveDataPrim name typeParams cons =
 
        myType = foldl AppT (ConT name) typeParams
        dataCxt typ = conT ''Data `appT` varT (mkName "ctx") `appT` return typ
-       dataCxt' typ = classP ''Data $ map pure [VarT (mkName "ctx"), typ]
-       satCxt typ = classP ''Sat $ map pure [VarT (mkName "ctx") `AppT` typ]
+       dataCxt' typ = classP ''Data $ map return [VarT (mkName "ctx"), typ]
+       satCxt typ = classP ''Sat $ map return [VarT (mkName "ctx") `AppT` typ]
        dataCxtTypes = filter (\x -> applied x /= ConT name) $ nub (typeParams ++ types)
        satCxtTypes = nub (myType : types)
        context = cxt (map dataCxt' dataCxtTypes ++ map satCxt satCxtTypes)
